@@ -1,4 +1,4 @@
-package communication
+package client
 
 import (
 	"bytes"
@@ -10,14 +10,13 @@ import (
 )
 
 type client struct {
-	scenario string
-	mnr      string
-	baseUrl  string
-	errored  bool
+	mnr     string
+	baseUrl string
+	errored bool
 }
 
-func NewClient(baseUrl string, scenario string, mnr string) *client {
-	return &client{mnr: mnr, scenario: scenario, baseUrl: fmt.Sprintf("%s/%s/assignment/%s", baseUrl, scenario, mnr)}
+func NewClient(baseUrl string, mnr string) *client {
+	return &client{mnr: mnr, baseUrl: fmt.Sprintf("%s/assignment/%s", baseUrl, mnr)}
 }
 
 func (c *client) GetToken() (string, error) {
