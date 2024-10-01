@@ -1,0 +1,50 @@
+package main
+
+import "time"
+
+type TokenInfo struct {
+	value      string
+	validUntil time.Time
+	valid      bool
+}
+
+type TokenManagerInMemory struct {
+	tokens map[string]TokenInfo
+}
+
+type TokenManager interface {
+	HasToken(string) bool
+	GetToken(string) (string, error)
+	ResetToken(string)
+	ValidateToken(string, string) (bool, error)
+	DisableToken(string)
+}
+
+func NewTokenManagerInMemory() *TokenManagerInMemory {
+	return &TokenManagerInMemory{
+		tokens: map[string]TokenInfo{},
+	}
+}
+
+func (tm *TokenManagerInMemory) HasToken(key string) bool {
+	_, exists := tm.tokens[key]
+	return exists
+}
+
+func (tm *TokenManagerInMemory) GetToken(key string) (string, error) {
+	token, exists := tm.tokens[key]
+	if exists {
+		return token.value, nil
+	}
+	token = TokenInfo{
+		value:      "",
+		validUntil: time.Now().Add(time.Minute * 10),
+		valid:      false,
+	}
+	return
+}
+
+func (tm *TokenManagerInMemory) ResetToken(key string) {
+	delete(tm.tokens, key)
+	return nil
+}

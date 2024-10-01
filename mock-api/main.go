@@ -2,14 +2,19 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 
+	"github.com/Fancy11111/ase-prep/mock-api/stage"
+	"github.com/Fancy11111/ase-prep/mock-api/token"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
@@ -46,7 +51,16 @@ func main() {
 
 }
 
+func createHandler[T any, S any](stage stage.Stage[T, S]) Handler[T, S] {
+	return Handler[T, S]{
+		tm:    token.NewTokenManagerInMemory(),
+		stage: stage,
+	}
+}
+
 func registerHandlers(mux *http.ServeMux) {
+
+	handler := createHandler(stage.NewStagePointC())
 	mux.HandleFunc("GET /ping", func(w http.ResponseWriter, r *http.Request) {
 		log.Info().Any("url", r.URL.Path).Any("method", r.Method).Msg("")
 		w.WriteHeader(http.StatusOK)
@@ -57,7 +71,14 @@ func registerHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("GET /assignment/{mnr}/token", func(w http.ResponseWriter, r *http.Request) {
 		mnr := r.PathValue("mnr")
 		log.Info().Any("url", r.URL.Path).Any("method", r.Method).Str("mnr", mnr).Msg("")
-		getToken(w, r, mnr)
+		handler.getToken(w, r, mnr)
+	})
+
+	mux.HandleFunc("GET /assignment/{mnr}/token/reset", func(w http.ResponseWriter, r *http.Request) {
+		mnr := r.PathValue("mnr")
+		log.Info().Any("url", r.URL.Path).Any("method", r.Method).Str("mnr", mnr).Msg("")
+		handler.tm.ResetToken(mnr)
+		w.WriteHeader(http.StatusOK)
 	})
 
 	mux.HandleFunc("GET /assignment/{mnr}/stage/{stage}/testcase/{testcase}", func(w http.ResponseWriter, r *http.Request) {
@@ -65,6 +86,15 @@ func registerHandlers(mux *http.ServeMux) {
 		stageNr := r.PathValue("stage")
 		testcase := r.PathValue("testcase")
 		token := r.URL.Query().Get("token")
+
+		testcaseNr, err := strconv.Atoi(testcase)
+		if err != nil {
+			log.Err(err).Str("testcase", testcase).Msg("Could not parse testcase number")
+			w.WriteHeader(http.StatusBadRequest)
+			io.WriteString(w, "Could not parse testcase number")
+			return
+		}
+
 		log.Info().Any("url", r.URL.Path).
 			Any("method", r.Method).
 			Str("mnr", mnr).
@@ -73,10 +103,10 @@ func registerHandlers(mux *http.ServeMux) {
 			Str("token", token).
 			Msg("")
 
-		getTestcase(w, r, TestcaseInfo{
+		handler.getTestcase(w, r, TestcaseInfo{
 			mnr:      mnr,
 			stage:    stageNr,
-			testcase: testcase,
+			testcase: testcaseNr,
 			token:    token,
 		})
 	})
@@ -87,6 +117,14 @@ func registerHandlers(mux *http.ServeMux) {
 		testcase := r.PathValue("testcase")
 		token := r.URL.Query().Get("token")
 
+		testcaseNr, err := strconv.Atoi(testcase)
+		if err != nil {
+			log.Err(err).Str("testcase", testcase).Msg("Could not parse testcase number")
+			w.WriteHeader(http.StatusBadRequest)
+			io.WriteString(w, "Could not parse testcase number")
+			return
+		}
+
 		log.Info().Any("url", r.URL.Path).
 			Any("method", r.Method).
 			Str("mnr", mnr).
@@ -95,10 +133,10 @@ func registerHandlers(mux *http.ServeMux) {
 			Str("token", token).
 			Msg("")
 
-		postTestResult(w, r, TestcaseInfo{
+		handler.postTestResult(w, r, TestcaseInfo{
 			mnr:      mnr,
 			stage:    stageNr,
-			testcase: testcase,
+			testcase: testcaseNr,
 			token:    token,
 		})
 	})
@@ -113,35 +151,82 @@ func registerHandlers(mux *http.ServeMux) {
 			Str("token", token).
 			Msg("")
 
-		getFinish(w, r)
+		handler.getFinish(w, r)
 	})
 	// mux.HandleFunc("")
 }
 
-func getToken(w http.ResponseWriter, r *http.Request, mnr string) {
+type Handler[T any, S any] struct {
+	tm    token.TokenManager
+	stage stage.Stage[stage.TestCase, stage.Solution]
+}
+
+func (h Handler[T, S]) getToken(w http.ResponseWriter, r *http.Request, mnr string) {
 	w.WriteHeader(http.StatusOK)
-	io.WriteString(w, "TODO")
+
+	token, err := h.tm.GetToken(mnr)
+	if err == nil {
+		io.WriteString(w, token)
+	}
 }
 
 type TestcaseInfo struct {
 	mnr      string
 	stage    string
-	testcase string
+	testcase int
 	token    string
 }
 
-func getTestcase(w http.ResponseWriter, r *http.Request, testcase TestcaseInfo) {
-	w.WriteHeader(http.StatusOK)
-	io.WriteString(w, "TODO")
+func (h Handler[T, S]) getTestcase(w http.ResponseWriter, r *http.Request, ti TestcaseInfo) {
+
+	valid, err := h.tm.ValidateToken(ti.mnr, ti.token)
+
+	if !valid {
+		io.WriteString(w, fmt.Sprintf("%v", err))
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	testcase := h.stage.CreateTestcase(ti.token, ti.testcase)
+
+	encoded, err := json.Marshal(testcase)
+	if err != nil {
+		log.Err(err).Msg("Could not marshal testcase")
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(encoded)
 }
 
-func postTestResult(w http.ResponseWriter, r *http.Request, testcase TestcaseInfo) {
+func (h Handler[T, S]) postTestResult(w http.ResponseWriter, r *http.Request, ti TestcaseInfo) {
 	log.Info().Any("url", r.URL.Path).Any("method", r.Method).Msg("")
+
+	valid, err := h.tm.ValidateToken(ti.mnr, ti.token)
+
+	if !valid {
+		io.WriteString(w, fmt.Sprintf("%v", err))
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	defer r.Body.Close()
+	solution := stage.Solution{}
+	err = json.NewDecoder(r.Body).Decode(&solution)
+
+	if err != nil {
+		log.Err(err).Msg("Could not unmarshal solution")
+		w.WriteHeader(http.StatusBadRequest)
+		io.WriteString(w, "Could not parse solution")
+		return
+	}
+
+	h.stage.ValidateSolution(ti.token, ti.testcase, solution)
+
 	w.WriteHeader(http.StatusOK)
-	io.WriteString(w, "TODO")
+	io.WriteString(w, "TODO: next testcase link")
 }
 
-func getFinish(w http.ResponseWriter, r *http.Request) {
+func (h Handler[T, S]) getFinish(w http.ResponseWriter, r *http.Request) {
 	log.Info().Any("url", r.URL.Path).Any("method", r.Method).Msg("")
 	w.WriteHeader(http.StatusOK)
 	io.WriteString(w, "TODO")
