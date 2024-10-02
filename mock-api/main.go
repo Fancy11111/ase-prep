@@ -24,10 +24,26 @@ func main() {
 	mux := http.NewServeMux()
 	registerHandlers(mux)
 
+	addr := os.Getenv("ADDR")
+	fmt.Println(addr)
+
+	if addr == "" {
+		addr = "localhost"
+	}
+
+	port := os.Getenv("PORT")
+	fmt.Println(port)
+
+	if port == "" {
+		port = "3000"
+	}
+
 	ctx, cancelCtx := context.WithCancel(context.Background())
+	baseAddr := fmt.Sprintf("%s:%s", addr, port)
+	ctx = context.WithValue(ctx, "baseAddr", baseAddr)
 
 	server := &http.Server{
-		Addr:    ":3000",
+		Addr:    baseAddr,
 		Handler: mux,
 		BaseContext: func(net.Listener) context.Context {
 			return ctx
@@ -38,21 +54,25 @@ func main() {
 		signalHandler := make(chan os.Signal, 1)
 		signal.Notify(signalHandler, syscall.SIGINT, syscall.SIGTERM)
 
-		<-signalHandler
-		cancelCtx()
+		signal := <-signalHandler
+		log.Info().Any("signal", signal).Msg("Got signal, shutting down")
+
+		server.Close()
 	}()
 
-	log.Info().Msg("Starting server")
+	log.Info().Str("baseAddress", baseAddr).Msg("Starting server")
 	if err := server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 		log.Err(err).Msg("Error while running server")
 	} else {
 		log.Info().Msg("Server shut down gracefully")
 	}
 
+	cancelCtx()
+
 }
 
-func createHandler[T any, S any](stage stage.Stage[T, S]) Handler[T, S] {
-	return Handler[T, S]{
+func createHandler(stage stage.StagePointsC) Handler {
+	return Handler{
 		tm:    token.NewTokenManagerInMemory(),
 		stage: stage,
 	}
@@ -66,6 +86,13 @@ func registerHandlers(mux *http.ServeMux) {
 		w.WriteHeader(http.StatusOK)
 
 		io.WriteString(w, "pong!")
+	})
+
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+		log.Info().Any("url", r.URL.Path).Any("method", r.Method).Msg("")
+		w.WriteHeader(http.StatusOK)
+
+		io.WriteString(w, "healthy")
 	})
 
 	mux.HandleFunc("GET /assignment/{mnr}/token", func(w http.ResponseWriter, r *http.Request) {
@@ -156,12 +183,12 @@ func registerHandlers(mux *http.ServeMux) {
 	// mux.HandleFunc("")
 }
 
-type Handler[T any, S any] struct {
+type Handler struct {
 	tm    token.TokenManager
 	stage stage.Stage[stage.TestCase, stage.Solution]
 }
 
-func (h Handler[T, S]) getToken(w http.ResponseWriter, r *http.Request, mnr string) {
+func (h Handler) getToken(w http.ResponseWriter, r *http.Request, mnr string) {
 	w.WriteHeader(http.StatusOK)
 
 	token, err := h.tm.GetToken(mnr)
@@ -177,7 +204,7 @@ type TestcaseInfo struct {
 	token    string
 }
 
-func (h Handler[T, S]) getTestcase(w http.ResponseWriter, r *http.Request, ti TestcaseInfo) {
+func (h Handler) getTestcase(w http.ResponseWriter, r *http.Request, ti TestcaseInfo) {
 
 	valid, err := h.tm.ValidateToken(ti.mnr, ti.token)
 
@@ -189,16 +216,20 @@ func (h Handler[T, S]) getTestcase(w http.ResponseWriter, r *http.Request, ti Te
 
 	testcase := h.stage.CreateTestcase(ti.token, ti.testcase)
 
+	log.Debug().Any("testcase", testcase).Msg("")
+
 	encoded, err := json.Marshal(testcase)
 	if err != nil {
 		log.Err(err).Msg("Could not marshal testcase")
 	}
 
+	log.Debug().Str("encoded", string(encoded)).Msg("encoded testcase")
+
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(encoded)
 }
 
-func (h Handler[T, S]) postTestResult(w http.ResponseWriter, r *http.Request, ti TestcaseInfo) {
+func (h Handler) postTestResult(w http.ResponseWriter, r *http.Request, ti TestcaseInfo) {
 	log.Info().Any("url", r.URL.Path).Any("method", r.Method).Msg("")
 
 	valid, err := h.tm.ValidateToken(ti.mnr, ti.token)
@@ -223,10 +254,19 @@ func (h Handler[T, S]) postTestResult(w http.ResponseWriter, r *http.Request, ti
 	h.stage.ValidateSolution(ti.token, ti.testcase, solution)
 
 	w.WriteHeader(http.StatusOK)
-	io.WriteString(w, "TODO: next testcase link")
+
+	baseUrl := r.Context().Value("baseAddr")
+
+	if ti.testcase >= 10 {
+		io.WriteString(w, fmt.Sprintf("%s/assignment/%s/finish?token=%s", baseUrl, ti.mnr, ti.token))
+		return
+	}
+
+	nextLink := fmt.Sprintf("%s/assignment/%s/stage/%s/testcase/%d?token=%s", baseUrl, ti.mnr, ti.stage, ti.testcase+1, ti.token)
+	io.WriteString(w, nextLink)
 }
 
-func (h Handler[T, S]) getFinish(w http.ResponseWriter, r *http.Request) {
+func (h Handler) getFinish(w http.ResponseWriter, r *http.Request) {
 	log.Info().Any("url", r.URL.Path).Any("method", r.Method).Msg("")
 	w.WriteHeader(http.StatusOK)
 	io.WriteString(w, "TODO")

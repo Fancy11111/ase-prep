@@ -3,8 +3,6 @@ package stage
 import (
 	"math"
 	"sort"
-
-	"github.com/rs/zerolog/log"
 )
 
 type StagePointsC struct {
@@ -34,17 +32,13 @@ func (p Point) Atan2() float64 {
 	return math.Atan2(p.Y, p.X)
 }
 
-func NewStagePointC() Stage[TestCase, Solution] {
+func NewStagePointC() StagePointsC {
 	return StagePointsC{}
 }
 
 func solveTestcase(testCase TestCase) Solution {
 	atanA := testCase.Obstacle.PointA.Atan2()
 	atanB := testCase.Obstacle.PointB.Atan2()
-	log.Info().
-		Float64("atan2-pointA", atanA).
-		Float64("atan2-pointB", atanB).
-		Msg("calculated ata2 for pointA")
 
 	min, max := math.Min(atanA, atanB), math.Max(atanB, atanA)
 	absLine := math.Abs(testCase.Obstacle.Line)
