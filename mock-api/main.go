@@ -43,7 +43,7 @@ func main() {
 	ctx = context.WithValue(ctx, "baseAddr", baseAddr)
 
 	server := &http.Server{
-		Addr:    baseAddr,
+		Addr:    fmt.Sprintf(":%s", port),
 		Handler: mux,
 		BaseContext: func(net.Listener) context.Context {
 			return ctx
