@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"github.com/Fancy11111/ase-prep/mock-api/stage"
+	"github.com/Fancy11111/ase-prep/mock-api/token"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"io"
 	"net"
 	"net/http"
@@ -13,16 +16,22 @@ import (
 	"strconv"
 	"syscall"
 
-	"github.com/Fancy11111/ase-prep/mock-api/stage"
-	"github.com/Fancy11111/ase-prep/mock-api/token"
-	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/log"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal().Err(err).Msg("exited with error")
+	}
+}
+
+func run() (err error) {
 	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
 	mux := http.NewServeMux()
 	registerHandlers(mux)
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	addr := os.Getenv("ADDR")
 	fmt.Println(addr)
@@ -38,9 +47,17 @@ func main() {
 		port = "3000"
 	}
 
-	ctx, cancelCtx := context.WithCancel(context.Background())
 	baseAddr := fmt.Sprintf("%s:%s", addr, port)
 	ctx = context.WithValue(ctx, "baseAddr", baseAddr)
+
+	/*	otelShutdown, err := setupOTelSDK(ctx)
+		if err != nil {
+			return
+		}
+		// Handle shutdown properly so nothing leaks.
+		defer func() {
+			err = errors.Join(err, otelShutdown(context.Background()))
+		}()*/
 
 	server := &http.Server{
 		Addr:    fmt.Sprintf(":%s", port),
@@ -50,7 +67,23 @@ func main() {
 		},
 	}
 
+	srvErr := make(chan error, 1)
 	go func() {
+		log.Info().Str("baseAddress", baseAddr).Msg("Starting server")
+		srvErr <- server.ListenAndServe()
+	}()
+
+	select {
+	case err = <-srvErr:
+		// Error when starting HTTP server.
+		return
+	case <-ctx.Done():
+		// Wait for first CTRL+C.
+		// Stop receiving signal notifications as soon as possible.
+		stop()
+	}
+
+	/*go func() {
 		signalHandler := make(chan os.Signal, 1)
 		signal.Notify(signalHandler, syscall.SIGINT, syscall.SIGTERM)
 
@@ -58,17 +91,16 @@ func main() {
 		log.Info().Any("signal", signal).Msg("Got signal, shutting down")
 
 		server.Close()
-	}()
+	}()*/
 
-	log.Info().Str("baseAddress", baseAddr).Msg("Starting server")
-	if err := server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+	/*if err := server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 		log.Err(err).Msg("Error while running server")
 	} else {
 		log.Info().Msg("Server shut down gracefully")
-	}
+	}*/
 
-	cancelCtx()
-
+	//cancelCtx()
+	return
 }
 
 func createHandler(stage stage.StagePointsC) Handler {
@@ -81,34 +113,41 @@ func createHandler(stage stage.StagePointsC) Handler {
 func registerHandlers(mux *http.ServeMux) {
 
 	handler := createHandler(stage.NewStagePointC())
-	mux.HandleFunc("GET /ping", func(w http.ResponseWriter, r *http.Request) {
+
+	handleFunc := func(pattern string, handlerFunc func(http.ResponseWriter, *http.Request)) {
+		// Configure the "http.route" for the HTTP instrumentation.
+		h := otelhttp.WithRouteTag(pattern, http.HandlerFunc(handlerFunc))
+		mux.Handle(pattern, h)
+	}
+
+	handleFunc("GET /ping", func(w http.ResponseWriter, r *http.Request) {
 		log.Info().Any("url", r.URL.Path).Any("method", r.Method).Msg("")
 		w.WriteHeader(http.StatusOK)
 
 		io.WriteString(w, "pong!")
 	})
 
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+	handleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		log.Info().Any("url", r.URL.Path).Any("method", r.Method).Msg("")
 		w.WriteHeader(http.StatusOK)
 
 		io.WriteString(w, "healthy")
 	})
 
-	mux.HandleFunc("GET /assignment/{mnr}/token", func(w http.ResponseWriter, r *http.Request) {
+	handleFunc("GET /assignment/{mnr}/token", func(w http.ResponseWriter, r *http.Request) {
 		mnr := r.PathValue("mnr")
 		log.Info().Any("url", r.URL.Path).Any("method", r.Method).Str("mnr", mnr).Msg("")
 		handler.getToken(w, r, mnr)
 	})
 
-	mux.HandleFunc("GET /assignment/{mnr}/token/reset", func(w http.ResponseWriter, r *http.Request) {
+	handleFunc("GET /assignment/{mnr}/token/reset", func(w http.ResponseWriter, r *http.Request) {
 		mnr := r.PathValue("mnr")
 		log.Info().Any("url", r.URL.Path).Any("method", r.Method).Str("mnr", mnr).Msg("")
 		handler.tm.ResetToken(mnr)
 		w.WriteHeader(http.StatusOK)
 	})
 
-	mux.HandleFunc("GET /assignment/{mnr}/stage/{stage}/testcase/{testcase}", func(w http.ResponseWriter, r *http.Request) {
+	handleFunc("GET /assignment/{mnr}/stage/{stage}/testcase/{testcase}", func(w http.ResponseWriter, r *http.Request) {
 		mnr := r.PathValue("mnr")
 		stageNr := r.PathValue("stage")
 		testcase := r.PathValue("testcase")
@@ -138,7 +177,7 @@ func registerHandlers(mux *http.ServeMux) {
 		})
 	})
 
-	mux.HandleFunc("POST /assignment/{mnr}/stage/{stage}/testcase/{testcase}", func(w http.ResponseWriter, r *http.Request) {
+	handleFunc("POST /assignment/{mnr}/stage/{stage}/testcase/{testcase}", func(w http.ResponseWriter, r *http.Request) {
 		mnr := r.PathValue("mnr")
 		stageNr := r.PathValue("stage")
 		testcase := r.PathValue("testcase")
@@ -168,7 +207,7 @@ func registerHandlers(mux *http.ServeMux) {
 		})
 	})
 
-	mux.HandleFunc("GET /assignment/{mnr}/finish", func(w http.ResponseWriter, r *http.Request) {
+	handleFunc("GET /assignment/{mnr}/finish", func(w http.ResponseWriter, r *http.Request) {
 		mnr := r.PathValue("mnr")
 		token := r.URL.Query().Get("token")
 
